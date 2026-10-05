@@ -24,28 +24,37 @@ const coordinateSchema = {
   z: z.coerce.number().describe("Z coordinate of the container")
 };
 
+type Coordinates = { x: number; y: number; z: number };
+type TransferArgs = Coordinates & { itemName: string; count?: number };
+
+const transferSchema = (verb: string) => ({
+  ...coordinateSchema,
+  itemName: z.string().trim().min(1).describe(`Name of the item to ${verb}`),
+  count: z.number().int().positive().optional().describe(`Amount to ${verb} (default: all matching items)`)
+});
+
 function isContainerBlock(block: Block): boolean {
   return CONTAINER_BLOCKS.has(block.name) || block.name.endsWith('shulker_box');
 }
 
-function findMatchingItems(items: Item[], itemName: string): Item[] {
-  const first = items.find((item) => item.name.includes(itemName.toLowerCase()));
-  if (!first) {
-    return [];
+/** Finds the first item matching the name and totals every stack of that same item type. */
+function findMatch(items: Item[], itemName: string): { item: Item; total: number } | undefined {
+  const needle = itemName.toLowerCase();
+  const item = items.find((candidate) => candidate.name.includes(needle));
+  if (!item) {
+    return undefined;
   }
-  return items.filter((item) => item.type === first.type);
-}
-
-function sumCount(items: Item[]): number {
-  return items.reduce((total, item) => total + item.count, 0);
+  const total = items
+    .filter((candidate) => candidate.type === item.type)
+    .reduce((sum, candidate) => sum + candidate.count, 0);
+  return { item, total };
 }
 
 export function registerContainerTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   const resolveContainerBlock = (
-    x: number,
-    y: number,
-    z: number
-  ): { block: Block } | { error: string } => {
+    args: Coordinates
+  ): { block: Block; x: number; y: number; z: number } | { error: string } => {
+    const { x, y, z } = coerceCoordinates(args.x, args.y, args.z);
     const bot = getBot();
     const pos = new Vec3(x, y, z);
     const block = bot.blockAt(pos);
@@ -62,7 +71,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       };
     }
 
-    return { block };
+    return { block, x, y, z };
   };
 
   const withContainer = async <T>(
@@ -85,14 +94,12 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
     "list-container",
     "List the items inside a container block (chest, barrel, shulker box, etc.)",
     coordinateSchema,
-    async ({ x, y, z }: { x: number; y: number; z: number }) => {
-      ({ x, y, z } = coerceCoordinates(x, y, z));
-
-      const resolved = resolveContainerBlock(x, y, z);
+    async (args: Coordinates) => {
+      const resolved = resolveContainerBlock(args);
       if ('error' in resolved) {
         return factory.createResponse(resolved.error);
       }
-      const { block } = resolved;
+      const { block, x, y, z } = resolved;
 
       return withContainer(block, async (container) => {
         const items = container.containerItems();
@@ -117,33 +124,21 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
   factory.registerTool(
     "deposit-item",
     "Put items from the bot's inventory into a container block",
-    {
-      ...coordinateSchema,
-      itemName: z.string().trim().min(1).describe("Name of the item to deposit"),
-      count: z.number().int().positive().optional().describe("Amount to deposit (default: all matching items)")
-    },
-    async ({ x, y, z, itemName, count }: {
-      x: number;
-      y: number;
-      z: number;
-      itemName: string;
-      count?: number;
-    }) => {
-      ({ x, y, z } = coerceCoordinates(x, y, z));
-
-      const resolved = resolveContainerBlock(x, y, z);
+    transferSchema("deposit"),
+    async ({ itemName, count, ...coords }: TransferArgs) => {
+      const resolved = resolveContainerBlock(coords);
       if ('error' in resolved) {
         return factory.createResponse(resolved.error);
       }
-      const { block } = resolved;
+      const { block, x, y, z } = resolved;
 
-      const matches = findMatchingItems(getBot().inventory.items(), itemName);
-      if (matches.length === 0) {
+      const match = findMatch(getBot().inventory.items(), itemName);
+      if (!match) {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
-      const item = matches[0];
-      const amount = Math.min(count ?? Infinity, sumCount(matches));
+      const { item, total } = match;
+      const amount = Math.min(count ?? total, total);
 
       return withContainer(block, async (container) => {
         await container.deposit(item.type, item.metadata ?? null, amount);
@@ -157,36 +152,24 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
   factory.registerTool(
     "withdraw-item",
     "Take items out of a container block into the bot's inventory",
-    {
-      ...coordinateSchema,
-      itemName: z.string().trim().min(1).describe("Name of the item to withdraw"),
-      count: z.number().int().positive().optional().describe("Amount to withdraw (default: all matching items)")
-    },
-    async ({ x, y, z, itemName, count }: {
-      x: number;
-      y: number;
-      z: number;
-      itemName: string;
-      count?: number;
-    }) => {
-      ({ x, y, z } = coerceCoordinates(x, y, z));
-
-      const resolved = resolveContainerBlock(x, y, z);
+    transferSchema("withdraw"),
+    async ({ itemName, count, ...coords }: TransferArgs) => {
+      const resolved = resolveContainerBlock(coords);
       if ('error' in resolved) {
         return factory.createResponse(resolved.error);
       }
-      const { block } = resolved;
+      const { block, x, y, z } = resolved;
 
       return withContainer(block, async (container) => {
-        const matches = findMatchingItems(container.containerItems(), itemName);
-        if (matches.length === 0) {
+        const match = findMatch(container.containerItems(), itemName);
+        if (!match) {
           return factory.createResponse(
             `Couldn't find any item matching '${itemName}' in ${block.name} at (${x}, ${y}, ${z})`
           );
         }
 
-        const item = matches[0];
-        const amount = Math.min(count ?? Infinity, sumCount(matches));
+        const { item, total } = match;
+        const amount = Math.min(count ?? total, total);
 
         await container.withdraw(item.type, item.metadata ?? null, amount);
         return factory.createResponse(
