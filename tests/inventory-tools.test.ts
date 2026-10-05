@@ -164,3 +164,52 @@ test('equip-item returns message when item not found', async (t) => {
 
   t.true(result.content[0].text.includes('Couldn\'t find'));
 });
+
+const setupDropItem = (items: { name: string; count: number; type: number; metadata: number }[]) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockBot = {
+    inventory: { items: () => items },
+    toss: sinon.stub().resolves()
+  } as unknown as Partial<mineflayer.Bot>;
+
+  registerInventoryTools(factory, () => mockBot as mineflayer.Bot);
+
+  const call = (mockServer.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === 'drop-item');
+  return { executor: call!.args[3], toss: mockBot.toss as sinon.SinonStub };
+};
+
+test('drop-item drops all matching items by default', async (t) => {
+  const { executor, toss } = setupDropItem([
+    { name: 'cobblestone', count: 64, type: 1, metadata: 0 },
+    { name: 'cobblestone', count: 6, type: 1, metadata: 0 }
+  ]);
+  const result = await executor({ itemName: 'cobblestone' });
+  t.is(result.content[0].text, 'Dropped 70 cobblestone');
+  t.true(toss.calledOnceWith(1, 0, 70));
+});
+
+test('drop-item caps count at the amount in inventory', async (t) => {
+  const { executor, toss } = setupDropItem([{ name: 'coal', count: 3, type: 5, metadata: 0 }]);
+  const result = await executor({ itemName: 'coal', count: 10 });
+  t.is(result.content[0].text, 'Dropped 3 coal');
+  t.true(toss.calledOnceWith(5, 0, 3));
+});
+
+test('drop-item returns message when item not found', async (t) => {
+  const { executor, toss } = setupDropItem([]);
+  const result = await executor({ itemName: 'diamond' });
+  t.true(result.content[0].text.includes("Couldn't find any item matching 'diamond'"));
+  t.false(toss.called);
+});
+
+test('drop-item returns error when toss fails', async (t) => {
+  const { executor, toss } = setupDropItem([{ name: 'dirt', count: 1, type: 3, metadata: 0 }]);
+  toss.rejects(new Error('window closed'));
+  const result = await executor({ itemName: 'dirt' });
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('window closed'));
+});

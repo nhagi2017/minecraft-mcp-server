@@ -1,6 +1,7 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
+import { findMatch } from './item-utils.js';
 
 interface InventoryItem {
   name: string;
@@ -76,6 +77,29 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
 
       await bot.equip(item, destination as mineflayer.EquipmentDestination);
       return factory.createResponse(`Equipped ${item.name} to ${destination}`);
+    }
+  );
+
+  factory.registerTool(
+    "drop-item",
+    "Drop items from the bot's inventory in the direction it is facing (use look-at first to aim)",
+    {
+      itemName: z.string().trim().min(1).describe("Name of the item to drop"),
+      count: z.number().int().positive().optional().describe("Amount to drop (default: all matching items)")
+    },
+    async ({ itemName, count }: { itemName: string; count?: number }) => {
+      const bot = getBot();
+      const match = findMatch(bot.inventory.items(), itemName);
+
+      if (!match) {
+        return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
+      }
+
+      const { item, total } = match;
+      const amount = Math.min(count ?? total, total);
+
+      await bot.toss(item.type, item.metadata ?? null, amount);
+      return factory.createResponse(`Dropped ${amount} ${item.name}`);
     }
   );
 }

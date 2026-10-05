@@ -1,10 +1,10 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import type { Block } from 'prismarine-block';
-import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { findMatch } from './item-utils.js';
 
 const CONTAINER_BLOCKS = new Set([
   'chest',
@@ -35,19 +35,6 @@ const transferSchema = (verb: string) => ({
 
 function isContainerBlock(block: Block): boolean {
   return CONTAINER_BLOCKS.has(block.name) || block.name.endsWith('shulker_box');
-}
-
-/** Finds the first item matching the name and totals every stack of that same item type. */
-function findMatch(items: Item[], itemName: string): { item: Item; total: number } | undefined {
-  const needle = itemName.toLowerCase();
-  const item = items.find((candidate) => candidate.name.includes(needle));
-  if (!item) {
-    return undefined;
-  }
-  const total = items
-    .filter((candidate) => candidate.type === item.type)
-    .reduce((sum, candidate) => sum + candidate.count, 0);
-  return { item, total };
 }
 
 export function registerContainerTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
