@@ -232,11 +232,14 @@ const setupUseItem = (heldItem: { name: string } | null, offHandItem: { name: st
   const factory = new ToolFactory(mockServer, mockConnection);
   const slots: unknown[] = [];
   slots[45] = offHandItem;
+  const write = sinon.stub();
   const mockBot = {
     heldItem,
     inventory: { slots },
     getEquipmentDestSlot: () => 45,
     registry: { foodsByName: { bread: {}, cooked_beef: {} } },
+    entity: { yaw: 0, pitch: 0 },
+    _client: { write },
     activateItem: sinon.stub(),
     deactivateItem: sinon.stub(),
     consume: sinon.stub().resolves()
@@ -247,11 +250,28 @@ const setupUseItem = (heldItem: { name: string } | null, offHandItem: { name: st
   const call = (mockServer.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === 'use-item');
   return {
     executor: call!.args[3],
+    bot: mockBot as mineflayer.Bot,
+    write,
     activateItem: mockBot.activateItem as sinon.SinonStub,
     deactivateItem: mockBot.deactivateItem as sinon.SinonStub,
     consume: mockBot.consume as sinon.SinonStub
   };
 };
+
+test('use-item sends the bot\'s current rotation in use_item packets', async (t) => {
+  const { executor, bot, write } = setupUseItem({ name: 'bucket' });
+  bot.entity.yaw = Math.PI / 2;
+  bot.entity.pitch = -Math.PI / 4;
+  await executor({});
+  await executor({});
+
+  bot._client.write('use_item', { hand: 0, sequence: 1, rotation: { x: 0, y: 0 } });
+  bot._client.write('arm_animation', { hand: 0 });
+
+  t.true(write.calledTwice);
+  t.deepEqual(write.firstCall.args, ['use_item', { hand: 0, sequence: 1, rotation: { x: 90, y: 45 } }]);
+  t.deepEqual(write.secondCall.args, ['arm_animation', { hand: 0 }]);
+});
 
 test('use-item activates a non-food held item', async (t) => {
   const { executor, activateItem, deactivateItem, consume } = setupUseItem({ name: 'snowball' });
