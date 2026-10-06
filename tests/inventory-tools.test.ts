@@ -223,3 +223,101 @@ test('drop-item prefers an exact name match over an earlier partial match', asyn
   t.is(result.content[0].text, 'Dropped 2 wheat');
   t.true(toss.calledOnceWith(11, 0, 2));
 });
+
+const setupUseItem = (heldItem: { name: string } | null, offHandItem: { name: string } | null = null) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const slots: unknown[] = [];
+  slots[45] = offHandItem;
+  const mockBot = {
+    heldItem,
+    inventory: { slots },
+    getEquipmentDestSlot: () => 45,
+    registry: { foodsByName: { bread: {}, cooked_beef: {} } },
+    activateItem: sinon.stub(),
+    deactivateItem: sinon.stub(),
+    consume: sinon.stub().resolves()
+  } as unknown as Partial<mineflayer.Bot>;
+
+  registerInventoryTools(factory, () => mockBot as mineflayer.Bot);
+
+  const call = (mockServer.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === 'use-item');
+  return {
+    executor: call!.args[3],
+    activateItem: mockBot.activateItem as sinon.SinonStub,
+    deactivateItem: mockBot.deactivateItem as sinon.SinonStub,
+    consume: mockBot.consume as sinon.SinonStub
+  };
+};
+
+test('use-item activates a non-food held item', async (t) => {
+  const { executor, activateItem, deactivateItem, consume } = setupUseItem({ name: 'snowball' });
+  const result = await executor({});
+  t.is(result.content[0].text, 'Used snowball');
+  t.true(activateItem.calledOnceWith(false));
+  t.false(deactivateItem.called);
+  t.false(consume.called);
+});
+
+test('use-item consumes food until finished', async (t) => {
+  const { executor, activateItem, consume } = setupUseItem({ name: 'bread' });
+  const result = await executor({});
+  t.is(result.content[0].text, 'Consumed bread');
+  t.true(consume.calledOnce);
+  t.false(activateItem.called);
+});
+
+test('use-item consumes potions', async (t) => {
+  const { executor, consume } = setupUseItem({ name: 'potion' });
+  const result = await executor({});
+  t.is(result.content[0].text, 'Consumed potion');
+  t.true(consume.calledOnce);
+});
+
+test('use-item returns error when consume fails', async (t) => {
+  const { executor, consume } = setupUseItem({ name: 'cooked_beef' });
+  consume.rejects(new Error('Food is full'));
+  const result = await executor({});
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('Food is full'));
+});
+
+test('use-item holds and releases the item for holdSeconds', async (t) => {
+  const clock = sinon.useFakeTimers();
+  t.teardown(() => clock.restore());
+  const { executor, activateItem, deactivateItem } = setupUseItem({ name: 'bow' });
+  const pending = executor({ holdSeconds: 1.5 });
+  await clock.tickAsync(1499);
+  t.true(activateItem.calledOnceWith(false));
+  t.false(deactivateItem.called);
+  await clock.tickAsync(1);
+  const result = await pending;
+  t.is(result.content[0].text, 'Used bow for 1.5s');
+  t.true(deactivateItem.calledOnce);
+});
+
+test('use-item uses the off-hand item when offHand is true', async (t) => {
+  const { executor, activateItem } = setupUseItem({ name: 'bread' }, { name: 'shield' });
+  const result = await executor({ offHand: true });
+  t.is(result.content[0].text, 'Used shield');
+  t.true(activateItem.calledOnceWith(true));
+});
+
+test('use-item returns message when the hand is empty', async (t) => {
+  const { executor, activateItem } = setupUseItem(null);
+  const mainHand = await executor({});
+  const offHand = await executor({ offHand: true });
+  t.is(mainHand.content[0].text, 'The bot is not holding anything in its main hand');
+  t.is(offHand.content[0].text, 'The bot is not holding anything in its off hand');
+  t.false(activateItem.called);
+});
+
+test('use-item rejects a non-positive holdSeconds', async (t) => {
+  const { executor, activateItem } = setupUseItem({ name: 'bow' });
+  const result = await executor({ holdSeconds: 0 });
+  t.true(result.isError);
+  t.false(activateItem.called);
+});

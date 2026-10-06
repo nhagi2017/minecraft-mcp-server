@@ -93,4 +93,46 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
       return factory.createResponse(`Dropped ${amount} ${item.name}`);
     }
   );
+
+  factory.registerTool(
+    "use-item",
+    "Use (right-click) the item the bot is holding, in the direction it is facing (use look-at first to aim). " +
+      "Food and drinks in the main hand are consumed until finished. " +
+      "For items that must be held down, such as a bow, crossbow, trident or shield, pass holdSeconds.",
+    {
+      offHand: z.boolean().optional().describe("Use the item in the off hand instead of the main hand (default: false)"),
+      holdSeconds: z.number().positive().max(10).optional()
+        .describe("Keep the item in use for this many seconds, then release it (e.g. 1 to fully draw a bow)")
+    },
+    async ({ offHand = false, holdSeconds }: { offHand?: boolean; holdSeconds?: number }) => {
+      const bot = getBot();
+      const item = offHand ? bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')] : bot.heldItem;
+
+      if (!item) {
+        return factory.createResponse(`The bot is not holding anything in its ${offHand ? 'off hand' : 'main hand'}`);
+      }
+
+      if (holdSeconds !== undefined) {
+        bot.activateItem(offHand);
+        await new Promise((resolve) => setTimeout(resolve, holdSeconds * 1000));
+        bot.deactivateItem();
+        return factory.createResponse(`Used ${item.name} for ${holdSeconds}s`);
+      }
+
+      if (!offHand && isConsumable(bot, item.name)) {
+        await bot.consume();
+        return factory.createResponse(`Consumed ${item.name}`);
+      }
+
+      bot.activateItem(offHand);
+      return factory.createResponse(`Used ${item.name}`);
+    }
+  );
+}
+
+// Drinkable items that mineflayer's consume() handles but the registry doesn't list as food
+const DRINKS = ['potion', 'milk_bucket'];
+
+function isConsumable(bot: mineflayer.Bot, itemName: string): boolean {
+  return DRINKS.includes(itemName) || itemName in bot.registry.foodsByName;
 }

@@ -101,6 +101,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `find-item` - Find a specific item in inventory
 - `equip-item` - Equip a specific item
 - `drop-item` - Drop items from inventory in the direction the bot is facing
+- `use-item` - Use the held item (eat/drink, throw, or hold down a bow or shield)
 
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates
