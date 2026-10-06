@@ -213,3 +213,13 @@ test('drop-item returns error when toss fails', async (t) => {
   t.true(result.isError);
   t.true(result.content[0].text.includes('window closed'));
 });
+
+test('drop-item prefers an exact name match over an earlier partial match', async (t) => {
+  const { executor, toss } = setupDropItem([
+    { name: 'wheat_seeds', count: 5, type: 10, metadata: 0 },
+    { name: 'wheat', count: 2, type: 11, metadata: 0 }
+  ]);
+  const result = await executor({ itemName: 'wheat' });
+  t.is(result.content[0].text, 'Dropped 2 wheat');
+  t.true(toss.calledOnceWith(11, 0, 2));
+});
