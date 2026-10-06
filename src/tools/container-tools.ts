@@ -4,7 +4,7 @@ import type { Block } from 'prismarine-block';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { findMatch } from './item-utils.js';
+import { findMatch, itemCountSchema, type ItemCountArgs } from './item-utils.js';
 
 const CONTAINER_BLOCKS = new Set([
   'chest',
@@ -25,12 +25,11 @@ const coordinateSchema = {
 };
 
 type Coordinates = { x: number; y: number; z: number };
-type TransferArgs = Coordinates & { itemName: string; count?: number };
+type TransferArgs = Coordinates & ItemCountArgs;
 
 const transferSchema = (verb: string) => ({
   ...coordinateSchema,
-  itemName: z.string().trim().min(1).describe(`Name of the item to ${verb}`),
-  count: z.number().int().positive().optional().describe(`Amount to ${verb} (default: all matching items)`)
+  ...itemCountSchema(verb)
 });
 
 function isContainerBlock(block: Block): boolean {
@@ -119,13 +118,12 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       }
       const { block, x, y, z } = resolved;
 
-      const match = findMatch(getBot().inventory.items(), itemName);
+      const match = findMatch(getBot().inventory.items(), itemName, count);
       if (!match) {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
-      const { item, total } = match;
-      const amount = Math.min(count ?? total, total);
+      const { item, amount } = match;
 
       return withContainer(block, async (container) => {
         await container.deposit(item.type, item.metadata ?? null, amount);
@@ -148,15 +146,14 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       const { block, x, y, z } = resolved;
 
       return withContainer(block, async (container) => {
-        const match = findMatch(container.containerItems(), itemName);
+        const match = findMatch(container.containerItems(), itemName, count);
         if (!match) {
           return factory.createResponse(
             `Couldn't find any item matching '${itemName}' in ${block.name} at (${x}, ${y}, ${z})`
           );
         }
 
-        const { item, total } = match;
-        const amount = Math.min(count ?? total, total);
+        const { item, amount } = match;
 
         await container.withdraw(item.type, item.metadata ?? null, amount);
         return factory.createResponse(

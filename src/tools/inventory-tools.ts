@@ -1,7 +1,7 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
-import { findMatch } from './item-utils.js';
+import { findMatch, itemCountSchema, type ItemCountArgs } from './item-utils.js';
 
 interface InventoryItem {
   name: string;
@@ -44,10 +44,7 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
     },
     async ({ nameOrType }) => {
       const bot = getBot();
-      const items = bot.inventory.items();
-      const item = items.find((item) =>
-        item.name.includes(nameOrType.toLowerCase())
-      );
+      const item = findMatch(bot.inventory.items(), nameOrType)?.item;
 
       if (item) {
         return factory.createResponse(`Found ${item.count} ${item.name} in inventory (slot ${item.slot})`);
@@ -66,10 +63,7 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
     },
     async ({ itemName, destination = 'hand' }) => {
       const bot = getBot();
-      const items = bot.inventory.items();
-      const item = items.find((item) =>
-        item.name.includes(itemName.toLowerCase())
-      );
+      const item = findMatch(bot.inventory.items(), itemName)?.item;
 
       if (!item) {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
@@ -83,20 +77,16 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
   factory.registerTool(
     "drop-item",
     "Drop items from the bot's inventory in the direction it is facing (use look-at first to aim)",
-    {
-      itemName: z.string().trim().min(1).describe("Name of the item to drop"),
-      count: z.number().int().positive().optional().describe("Amount to drop (default: all matching items)")
-    },
-    async ({ itemName, count }: { itemName: string; count?: number }) => {
+    itemCountSchema("drop"),
+    async ({ itemName, count }: ItemCountArgs) => {
       const bot = getBot();
-      const match = findMatch(bot.inventory.items(), itemName);
+      const match = findMatch(bot.inventory.items(), itemName, count);
 
       if (!match) {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
-      const { item, total } = match;
-      const amount = Math.min(count ?? total, total);
+      const { item, amount } = match;
 
       await bot.toss(item.type, item.metadata ?? null, amount);
       return factory.createResponse(`Dropped ${amount} ${item.name}`);
