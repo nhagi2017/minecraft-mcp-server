@@ -110,6 +110,11 @@ Once connected to a Minecraft server, Claude can use these commands:
 ### Furnace
 - `smelt-item` - Smelt items using a furnace-like block
 
+### Container
+- `list-container` - List the items inside a chest, barrel, shulker box or other container
+- `deposit-item` - Put items from the bot's inventory into a container
+- `withdraw-item` - Take items out of a container into the bot's inventory
+
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
 
