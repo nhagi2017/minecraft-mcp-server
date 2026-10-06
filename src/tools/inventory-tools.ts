@@ -113,8 +113,6 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
         return factory.createResponse(`The bot is not holding anything in its ${offHand ? 'off hand' : 'main hand'}`);
       }
 
-      patchUseItemRotation(bot);
-
       if (holdSeconds !== undefined) {
         bot.activateItem(offHand);
         await new Promise((resolve) => setTimeout(resolve, holdSeconds * 1000));
@@ -138,32 +136,4 @@ const DRINKS = ['potion', 'milk_bucket'];
 
 function isConsumable(bot: mineflayer.Bot, itemName: string): boolean {
   return DRINKS.includes(itemName) || itemName in bot.registry.foodsByName;
-}
-
-const patchedClients = new WeakSet<object>();
-
-/**
- * Since 1.21 the server turns the player to the rotation carried in the use_item packet,
- * but mineflayer's activateItem() always sends 0/0, so buckets and bows ignore look-at.
- * Rewrite that field with the bot's actual yaw and pitch (in Notchian degrees).
- */
-function patchUseItemRotation(bot: mineflayer.Bot): void {
-  const client = bot._client;
-  if (patchedClients.has(client)) {
-    return;
-  }
-  patchedClients.add(client);
-  const write = client.write.bind(client);
-  client.write = (name: string, params: Record<string, unknown>) => {
-    if (name === 'use_item' && params.rotation) {
-      params = {
-        ...params,
-        rotation: {
-          x: (Math.PI - bot.entity.yaw) * 180 / Math.PI,
-          y: -bot.entity.pitch * 180 / Math.PI
-        }
-      };
-    }
-    return write(name, params);
-  };
 }
