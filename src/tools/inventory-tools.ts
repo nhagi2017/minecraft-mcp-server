@@ -76,7 +76,8 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
 
   factory.registerTool(
     "drop-item",
-    "Drop items from the bot's inventory in the direction it is facing (use look-at first to aim)",
+    "Drop items from the bot's inventory in the direction it is facing (use look-at first to aim). " +
+      "Dropped items can be picked back up by the bot after a moment if it stays close to them.",
     itemCountSchema("drop"),
     async ({ itemName, count }: ItemCountArgs) => {
       const bot = getBot();
