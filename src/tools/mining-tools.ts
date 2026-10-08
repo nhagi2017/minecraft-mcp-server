@@ -1,0 +1,247 @@
+import { z } from "zod";
+import mineflayer from 'mineflayer';
+import pathfinderPkg from 'mineflayer-pathfinder';
+const { goals, Movements } = pathfinderPkg;
+import { Vec3 } from 'vec3';
+import minecraftData from 'minecraft-data';
+import type { Block } from 'prismarine-block';
+import type { Item } from 'prismarine-item';
+import { ToolFactory } from '../tool-factory.js';
+import { log } from '../logger.js';
+import { coerceCoordinates } from './coordinate-utils.js';
+
+const MAX_BLOCKS = 64;
+const REACH = 4.5;
+const PICKUP_RADIUS = 8;
+const PICKUP_WALK_MS = 5000;
+const FLUIDS = new Set(['water', 'lava', 'bubble_column']);
+const AIR = new Set(['air', 'cave_air', 'void_air']);
+const NEIGHBORS = [
+  new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0),
+  new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)
+];
+
+export const isFluid = (block: Block | null): boolean =>
+  block !== null && (FLUIDS.has(block.name) || String(block.getProperties?.().waterlogged) === 'true');
+
+/** The fluid touching pos (breaking the block there would let it flow in), if any. */
+export function fluidNeighbor(bot: mineflayer.Bot, pos: Vec3): Block | null {
+  for (const d of NEIGHBORS) {
+    const neighbor = bot.blockAt(pos.plus(d));
+    if (isFluid(neighbor)) return neighbor;
+  }
+  return null;
+}
+
+/**
+ * The fastest tool in the inventory that still gets the block's drop: null when bare hands are
+ * as good as anything held, undefined when the block needs a tool the bot doesn't have.
+ */
+export function chooseTool(block: Block, items: Item[]): Item | null | undefined {
+  const harvestable = (item: Item | null) => block.canHarvest(item ? item.type : null);
+  const digTime = (item: Item | null) => block.digTime(item ? item.type : null, false, false, false, [], []);
+  let best: Item | null | undefined = harvestable(null) ? null : undefined;
+  let bestTime = best === null ? digTime(null) : Infinity;
+  for (const item of items) {
+    if (!harvestable(item)) continue;
+    const time = digTime(item);
+    if (time < bestTime) {
+      best = item;
+      bestTime = time;
+    }
+  }
+  return best;
+}
+
+const durabilityLeft = (item: Item) =>
+  item.maxDurability ? `${item.maxDurability - (item.durabilityUsed ?? 0)}/${item.maxDurability}` : undefined;
+
+const countItems = (bot: mineflayer.Bot) => {
+  const counts = new Map<string, number>();
+  for (const item of bot.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
+  return counts;
+};
+
+async function waitUntilGone(bot: mineflayer.Bot, pos: Vec3): Promise<boolean> {
+  for (let i = 0; i < 10; i++) {
+    const block = bot.blockAt(pos);
+    if (!block || AIR.has(block.name)) return true;
+    await bot.waitForTicks(2);
+  }
+  return false;
+}
+
+type WalkResult = 'reached' | 'timeout' | 'noPath';
+
+// Walks toward goal for at most ms. goto also resolves, rather than rejects, when the pathfinder
+// finds no path at all (an empty path), so check where the bot actually ended up. Clears its timer
+// either way, so a walk that finished early can't cancel whatever the pathfinder does next.
+async function walkFor(bot: mineflayer.Bot, goal: pathfinderPkg.goals.Goal, ms: number): Promise<WalkResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const walk = bot.pathfinder.goto(goal);
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => {
+      bot.pathfinder.stop();
+      walk.catch(() => {}); // rejects with PathStopped once stopped
+      resolve('timeout');
+    }, ms);
+  });
+  try {
+    const result = await Promise.race([walk.then(() => 'done' as const, () => 'noPath' as const), timeout]);
+    if (result !== 'done') return result;
+    // Typed as taking a Move, but the pathfinder itself calls it with a floored position.
+    return goal.isEnd(bot.entity.position.floored() as unknown as Parameters<typeof goal.isEnd>[0]) ? 'reached' : 'noPath';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const fmt = (p: Vec3) => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
+
+// Tries to collect one drop: first by walking into its cell (standing beside it isn't always close
+// enough, e.g. when it lies in a hole), then, only if that cell can't be reached at all (a 1-high
+// gap, or one open only diagonally), by standing next to it. Returns why it failed, or null once
+// collected.
+async function collectDrop(bot: mineflayer.Bot, drop: { id: number, position: Vec3 }): Promise<string | null> {
+  const cell = drop.position.floored();
+  const attempts: [string, pathfinderPkg.goals.Goal][] = [
+    ['its cell', new goals.GoalBlock(cell.x, cell.y, cell.z)],
+    ['next to it', new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)]
+  ];
+  let outcome = '';
+  for (const [where, goal] of attempts) {
+    const from = fmt(bot.entity.position);
+    const result = await walkFor(bot, goal, PICKUP_WALK_MS);
+    if (result === 'reached') await bot.waitForTicks(4);
+    if (!bot.entities[drop.id]) return null;
+    outcome = result === 'reached' ? `stood at ${where} but it was still there`
+      : result === 'timeout' ? `timed out walking to ${where} from ${from}`
+        : `no path to ${where} from ${from}`;
+    if (result !== 'noPath') break; // standing next to it won't help a slow or pointless walk
+  }
+  log('warn', `Could not collect dropped item at ${cell}: ${outcome}`);
+  return outcome;
+}
+
+// Walks over each dropped item near the bot, without digging or building on the way, once per drop:
+// later rounds only pick up drops that turned up meanwhile. Returns a note for each drop it saw but
+// couldn't collect, saying why, as the server's log isn't visible.
+async function pickUpDrops(bot: mineflayer.Bot): Promise<{ seen: number, missed: string[] }> {
+  const previous = bot.pathfinder.movements;
+  const noDigging = new Movements(bot, minecraftData(bot.version));
+  Object.assign(noDigging, { canDig: false, allow1by1towers: false, allowParkour: false, scafoldingBlocks: [] });
+  bot.pathfinder.setMovements(noDigging);
+  const tried = new Set<number>();
+  const missed = new Map<number, string>();
+  try {
+    for (let round = 0; round < 3; round++) {
+      if (round > 0) await bot.waitForTicks(10); // let drops still falling or bouncing settle
+      const drops = Object.values(bot.entities).filter((e) =>
+        e.name === 'item' && !tried.has(e.id) && e.position.distanceTo(bot.entity.position) <= PICKUP_RADIUS);
+      if (drops.length === 0) break;
+      for (const drop of drops) {
+        tried.add(drop.id);
+        if (!bot.entities[drop.id]) continue; // already picked up on the way
+        const outcome = await collectDrop(bot, drop);
+        if (outcome) missed.set(drop.id, `item at ${fmt(drop.position)}: ${outcome}`);
+      }
+    }
+  } finally {
+    bot.pathfinder.setGoal(null);
+    bot.pathfinder.setMovements(previous);
+  }
+  // Leave out drops picked up later, on the way to another one.
+  return { seen: tried.size, missed: [...missed].filter(([id]) => bot.entities[id]).map(([, note]) => note) };
+}
+
+export function registerMiningTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
+  factory.registerTool(
+    "mine-blocks",
+    "Mine a list of blocks in order, each with the fastest held tool that still gets its drop " +
+    "(equipped and checked before every block), then walk over the drops to pick them up. " +
+    "Never walks to reach a block: ones out of reach are skipped. Skips blocks next to water or lava, " +
+    "and stops at the first block no tool in the inventory can harvest (rather than mining it for nothing).",
+    {
+      blocks: z.array(z.object({
+        x: z.coerce.number(),
+        y: z.coerce.number(),
+        z: z.coerce.number()
+      })).min(1).max(MAX_BLOCKS).describe(`Block positions to mine, in order (up to ${MAX_BLOCKS})`),
+      pickUp: z.boolean().optional().describe("Walk over the drops afterwards to collect them (default: true)")
+    },
+    async ({ blocks, pickUp = true }: { blocks: { x: number, y: number, z: number }[], pickUp?: boolean }) => {
+      const bot = getBot();
+      const before = countItems(bot);
+      const mined = new Map<string, number>();
+      const toolsUsed = new Set<string>();
+      const skipped: string[] = [];
+      let stoppedAt: string | undefined;
+
+      for (const coords of blocks) {
+        const { x, y, z } = coerceCoordinates(coords.x, coords.y, coords.z);
+        const pos = new Vec3(x, y, z).floored();
+        const at = `(${pos.x}, ${pos.y}, ${pos.z})`;
+        const block = bot.blockAt(pos);
+        if (!block) { skipped.push(`${at} not loaded`); continue; }
+        if (AIR.has(block.name)) continue;
+        if (isFluid(block)) { skipped.push(`${at} is ${block.name}`); continue; }
+        const fluid = fluidNeighbor(bot, pos);
+        if (fluid) { skipped.push(`${at} ${block.name}: ${fluid.name} next to it`); continue; }
+        if (bot.entity.position.offset(0, bot.entity.height * 0.9, 0).distanceTo(pos.offset(0.5, 0.5, 0.5)) > REACH) {
+          skipped.push(`${at} ${block.name}: out of reach`);
+          continue;
+        }
+
+        const tool = chooseTool(block, bot.inventory.items());
+        if (tool === undefined) {
+          stoppedAt = `${at} ${block.name}: no tool in the inventory can harvest it`;
+          break;
+        }
+        if (tool) {
+          await bot.equip(tool, 'hand');
+          if (bot.heldItem?.type !== tool.type) {
+            stoppedAt = `${at} ${block.name}: could not equip ${tool.name}`;
+            break;
+          }
+          toolsUsed.add(tool.name);
+        } else if (bot.heldItem) {
+          await bot.unequip('hand');
+        }
+
+        await bot.dig(block, true);
+        if (!(await waitUntilGone(bot, pos))) {
+          skipped.push(`${at} ${block.name}: the server did not break it`);
+          continue;
+        }
+        mined.set(block.name, (mined.get(block.name) ?? 0) + 1);
+      }
+
+      const pickup = pickUp && mined.size > 0 ? await pickUpDrops(bot) : undefined;
+
+      const after = countItems(bot);
+      const gained = [...after]
+        .map(([name, n]) => [name, n - (before.get(name) ?? 0)] as const)
+        .filter(([, n]) => n > 0)
+        .map(([name, n]) => `${name} x${n}`);
+      const tools = [...toolsUsed].map((name) => {
+        const left = bot.inventory.items().filter((i) => i.name === name);
+        return left.length === 0
+          ? `${name}: none left`
+          : `${name}: ${left.length} left (durability ${left.map(durabilityLeft).join(', ')})`;
+      });
+
+      const lines = [
+        `Mined: ${[...mined].map(([name, n]) => `${name} x${n}`).join(', ') || 'nothing'}`,
+        `Picked up: ${gained.join(', ') || 'nothing'}`
+      ];
+      if (pickup) {
+        lines.push(`Drops seen nearby: ${pickup.seen}`);
+        if (pickup.missed.length) lines.push(`Drops left behind:\n${pickup.missed.map((s) => `- ${s}`).join('\n')}`);
+      }
+      if (tools.length) lines.push(`Tools: ${tools.join('; ')}`);
+      if (skipped.length) lines.push(`Skipped:\n${skipped.map((s) => `- ${s}`).join('\n')}`);
+      if (stoppedAt) lines.push(`Stopped at ${stoppedAt}`);
+      return factory.createResponse(lines.join('\n'));
+    }
+  );
+}

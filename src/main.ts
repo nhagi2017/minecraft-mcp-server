@@ -18,6 +18,7 @@ import { registerGameStateTools } from './tools/gamestate-tools.js';
 import { registerCraftingTools } from './tools/crafting-tools.js';
 import { registerFurnaceTools } from './tools/furnace-tools.js';
 import { registerContainerTools } from './tools/container-tools.js';
+import { registerMiningTools } from './tools/mining-tools.js';
 
 setupStdioFiltering();
 
@@ -61,6 +62,7 @@ async function main() {
   registerCraftingTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
   registerContainerTools(factory, getBot);
+  registerMiningTools(factory, getBot);
 
   process.stdin.on('end', () => {
     connection.cleanup();
