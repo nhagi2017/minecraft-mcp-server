@@ -2,6 +2,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
+import { patchUseItemRotation } from './use-item-rotation.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '1.21.11';
 
@@ -58,6 +59,7 @@ export class BotConnection {
     };
 
     this.bot = mineflayer.createBot(botOptions);
+    patchUseItemRotation(this.bot);
     this.state = 'connecting';
     this.isReconnecting = false;
 

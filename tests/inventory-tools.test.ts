@@ -165,21 +165,18 @@ test('equip-item returns message when item not found', async (t) => {
   t.true(result.content[0].text.includes('Couldn\'t find'));
 });
 
-const setupDropItem = (items: { name: string; count: number; type: number; metadata: number }[]) => {
+const getExecutor = (toolName: string, mockBot: object) => {
   const mockServer = { tool: sinon.stub() } as unknown as McpServer;
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
-  const mockBot = {
-    inventory: { items: () => items },
-    toss: sinon.stub().resolves()
-  } as unknown as Partial<mineflayer.Bot>;
+  registerInventoryTools(new ToolFactory(mockServer, mockConnection), () => mockBot as mineflayer.Bot);
+  return (mockServer.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === toolName)!.args[3];
+};
 
-  registerInventoryTools(factory, () => mockBot as mineflayer.Bot);
-
-  const call = (mockServer.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === 'drop-item');
-  return { executor: call!.args[3], toss: mockBot.toss as sinon.SinonStub };
+const setupDropItem = (items: { name: string; count: number; type: number; metadata: number }[]) => {
+  const toss = sinon.stub().resolves();
+  return { executor: getExecutor('drop-item', { inventory: { items: () => items }, toss }), toss };
 };
 
 test('drop-item drops all matching items by default', async (t) => {
@@ -222,4 +219,86 @@ test('drop-item prefers an exact name match over an earlier partial match', asyn
   const result = await executor({ itemName: 'wheat' });
   t.is(result.content[0].text, 'Dropped 2 wheat');
   t.true(toss.calledOnceWith(11, 0, 2));
+});
+
+const setupUseItem = (heldItem: { name: string } | null, offHandItem: { name: string } | null = null) => {
+  const slots: unknown[] = [];
+  slots[45] = offHandItem;
+  const stubs = {
+    activateItem: sinon.stub(),
+    deactivateItem: sinon.stub(),
+    consume: sinon.stub().resolves()
+  };
+  const mockBot = {
+    heldItem,
+    inventory: { slots },
+    getEquipmentDestSlot: () => 45,
+    registry: { foodsByName: { bread: {} } },
+    ...stubs
+  };
+  return { executor: getExecutor('use-item', mockBot), ...stubs };
+};
+
+test('use-item activates a non-food held item', async (t) => {
+  const { executor, activateItem, deactivateItem, consume } = setupUseItem({ name: 'snowball' });
+  const result = await executor({});
+  t.is(result.content[0].text, 'Used snowball');
+  t.true(activateItem.calledOnceWith(false));
+  t.false(deactivateItem.called);
+  t.false(consume.called);
+});
+
+for (const name of ['bread', 'potion']) {
+  test(`use-item consumes ${name} until finished`, async (t) => {
+    const { executor, activateItem, consume } = setupUseItem({ name });
+    const result = await executor({});
+    t.is(result.content[0].text, `Consumed ${name}`);
+    t.true(consume.calledOnce);
+    t.false(activateItem.called);
+  });
+}
+
+test('use-item returns error when consume fails', async (t) => {
+  const { executor, consume } = setupUseItem({ name: 'bread' });
+  consume.rejects(new Error('Food is full'));
+  const result = await executor({});
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('Food is full'));
+});
+
+test('use-item holds and releases the item for holdSeconds', async (t) => {
+  const clock = sinon.useFakeTimers();
+  t.teardown(() => clock.restore());
+  const { executor, activateItem, deactivateItem } = setupUseItem({ name: 'bow' });
+  const pending = executor({ holdSeconds: 1.5 });
+  await clock.tickAsync(1499);
+  t.true(activateItem.calledOnceWith(false));
+  t.false(deactivateItem.called);
+  await clock.tickAsync(1);
+  const result = await pending;
+  t.is(result.content[0].text, 'Used bow for 1.5s');
+  t.true(deactivateItem.calledOnce);
+});
+
+test('use-item uses the off-hand item when offHand is true', async (t) => {
+  const { executor, activateItem } = setupUseItem({ name: 'bread' }, { name: 'shield' });
+  const result = await executor({ offHand: true });
+  t.is(result.content[0].text, 'Used shield');
+  t.true(activateItem.calledOnceWith(true));
+});
+
+test('use-item returns message when the hand is empty', async (t) => {
+  const { executor, activateItem } = setupUseItem(null);
+  const mainHand = await executor({});
+  const offHand = await executor({ offHand: true });
+  t.is(mainHand.content[0].text, 'The bot is not holding anything in its main hand');
+  t.is(offHand.content[0].text, 'The bot is not holding anything in its off hand');
+  t.false(activateItem.called);
+});
+
+test('use-item rejects a non-positive holdSeconds', async (t) => {
+  const { executor, activateItem } = setupUseItem({ name: 'bow' });
+  const result = await executor({ holdSeconds: 0 });
+  t.true(result.isError);
+  t.false(activateItem.called);
 });
