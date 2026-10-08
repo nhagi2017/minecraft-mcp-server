@@ -3,6 +3,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 import { patchUseItemRotation } from './use-item-rotation.js';
+import { patchDigSpeeds } from './dig-speeds.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '1.21.11';
 
@@ -67,9 +68,17 @@ export class BotConnection {
   }
 
   private registerEventHandlers(bot: mineflayer.Bot): void {
+    // Since 1.21.4 the server ignores digging and other actions until the client reports it
+    // has loaded (or ~3 s pass). The vanilla client sends player_loaded after every spawn;
+    // mineflayer doesn't, so early digs were dropped server-side while the bot saw them done.
+    bot.on('spawn', () => {
+      if (bot.registry.version['>=']('1.21.4')) bot._client.write('player_loaded', {});
+    });
+
     bot.once('spawn', async () => {
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
+      patchDigSpeeds(bot.registry);
 
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
