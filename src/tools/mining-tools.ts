@@ -70,7 +70,25 @@ async function waitUntilGone(bot: mineflayer.Bot, pos: Vec3): Promise<boolean> {
   return false;
 }
 
-// Walks onto each dropped item near the bot, without digging or building on the way.
+// Walks toward goal for at most ms, then gives up. Clears its timer either way, so a walk that
+// finished early can't cancel whatever the pathfinder is asked to do next.
+async function walkFor(bot: mineflayer.Bot, goal: pathfinderPkg.goals.Goal, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      bot.pathfinder.setGoal(null);
+      resolve();
+    }, ms);
+  });
+  try {
+    await Promise.race([bot.pathfinder.goto(goal), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Walks into the cell of each dropped item near the bot (standing beside one isn't always close
+// enough, e.g. when it lies in a hole), without digging or building on the way.
 async function pickUpDrops(bot: mineflayer.Bot): Promise<void> {
   const previous = bot.pathfinder.movements;
   const noDigging = new Movements(bot, minecraftData(bot.version));
@@ -83,21 +101,17 @@ async function pickUpDrops(bot: mineflayer.Bot): Promise<void> {
       if (drops.length === 0) return;
       for (const drop of drops) {
         if (!bot.entities[drop.id]) continue; // already picked up on the way
-        const p = drop.position;
-        const walk = bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 1));
-        const timeout = new Promise<void>((resolve) => setTimeout(() => {
-          bot.pathfinder.setGoal(null);
-          resolve();
-        }, PICKUP_WALK_MS));
+        const cell = drop.position.floored();
         try {
-          await Promise.race([walk, timeout]);
+          await walkFor(bot, new goals.GoalBlock(cell.x, cell.y, cell.z), PICKUP_WALK_MS);
         } catch (error) {
-          log('warn', `Could not reach dropped item at ${p}: ${error}`);
+          log('warn', `Could not reach dropped item at ${cell}: ${error}`);
         }
       }
       await bot.waitForTicks(10);
     }
   } finally {
+    bot.pathfinder.setGoal(null);
     bot.pathfinder.setMovements(previous);
   }
 }
