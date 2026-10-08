@@ -70,43 +70,57 @@ async function waitUntilGone(bot: mineflayer.Bot, pos: Vec3): Promise<boolean> {
   return false;
 }
 
-// Walks toward goal for at most ms, then gives up. Clears its timer either way, so a walk that
-// finished early can't cancel whatever the pathfinder is asked to do next.
-async function walkFor(bot: mineflayer.Bot, goal: pathfinderPkg.goals.Goal, ms: number): Promise<void> {
+// Walks toward goal for at most ms, then gives up: true if the walk finished, false on timeout.
+// Clears its timer either way, so a walk that finished early can't cancel whatever the
+// pathfinder is asked to do next.
+async function walkFor(bot: mineflayer.Bot, goal: pathfinderPkg.goals.Goal, ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
+  const timeout = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => {
       bot.pathfinder.setGoal(null);
-      resolve();
+      resolve(false);
     }, ms);
   });
   try {
-    await Promise.race([bot.pathfinder.goto(goal), timeout]);
+    return await Promise.race([bot.pathfinder.goto(goal).then(() => true), timeout]);
   } finally {
     clearTimeout(timer);
   }
 }
 
+const fmt = (p: Vec3) => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
+
 // Walks into the cell of each dropped item near the bot (standing beside one isn't always close
-// enough, e.g. when it lies in a hole), without digging or building on the way.
-async function pickUpDrops(bot: mineflayer.Bot): Promise<void> {
+// enough, e.g. when it lies in a hole), without digging or building on the way. Returns a note
+// for each drop it saw but couldn't collect, saying why, as the server's log isn't visible.
+async function pickUpDrops(bot: mineflayer.Bot): Promise<{ seen: number, missed: string[] }> {
   const previous = bot.pathfinder.movements;
   const noDigging = new Movements(bot, minecraftData(bot.version));
   Object.assign(noDigging, { canDig: false, allow1by1towers: false, allowParkour: false, scafoldingBlocks: [] });
   bot.pathfinder.setMovements(noDigging);
+  const seen = new Set<number>();
+  const missed = new Map<number, string>();
   try {
     for (let round = 0; round < 3; round++) {
       const drops = Object.values(bot.entities).filter((e) =>
         e.name === 'item' && e.position.distanceTo(bot.entity.position) <= PICKUP_RADIUS);
-      if (drops.length === 0) return;
+      if (drops.length === 0) break;
       for (const drop of drops) {
+        seen.add(drop.id);
         if (!bot.entities[drop.id]) continue; // already picked up on the way
         const cell = drop.position.floored();
+        let outcome: string;
         try {
-          await walkFor(bot, new goals.GoalBlock(cell.x, cell.y, cell.z), PICKUP_WALK_MS);
+          outcome = (await walkFor(bot, new goals.GoalBlock(cell.x, cell.y, cell.z), PICKUP_WALK_MS))
+            ? `walked to ${fmt(bot.entity.position)} but it was still there`
+            : `timed out walking from ${fmt(bot.entity.position)}`;
         } catch (error) {
-          log('warn', `Could not reach dropped item at ${cell}: ${error}`);
+          outcome = `no path from ${fmt(bot.entity.position)}: ${error instanceof Error ? error.message : error}`;
+          log('warn', `Could not reach dropped item at ${cell}: ${outcome}`);
         }
+        await bot.waitForTicks(4);
+        if (bot.entities[drop.id]) missed.set(drop.id, `item at ${fmt(drop.position)}: ${outcome}`);
+        else missed.delete(drop.id);
       }
       await bot.waitForTicks(10);
     }
@@ -114,6 +128,8 @@ async function pickUpDrops(bot: mineflayer.Bot): Promise<void> {
     bot.pathfinder.setGoal(null);
     bot.pathfinder.setMovements(previous);
   }
+  // A later round may have collected one an earlier round missed.
+  return { seen: seen.size, missed: [...missed].filter(([id]) => bot.entities[id]).map(([, note]) => note) };
 }
 
 export function registerMiningTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
@@ -177,7 +193,7 @@ export function registerMiningTools(factory: ToolFactory, getBot: () => mineflay
         mined.set(block.name, (mined.get(block.name) ?? 0) + 1);
       }
 
-      if (pickUp && mined.size > 0) await pickUpDrops(bot);
+      const pickup = pickUp && mined.size > 0 ? await pickUpDrops(bot) : undefined;
 
       const after = countItems(bot);
       const gained = [...after]
@@ -195,6 +211,10 @@ export function registerMiningTools(factory: ToolFactory, getBot: () => mineflay
         `Mined: ${[...mined].map(([name, n]) => `${name} x${n}`).join(', ') || 'nothing'}`,
         `Picked up: ${gained.join(', ') || 'nothing'}`
       ];
+      if (pickup) {
+        lines.push(`Drops seen nearby: ${pickup.seen}`);
+        if (pickup.missed.length) lines.push(`Drops left behind:\n${pickup.missed.map((s) => `- ${s}`).join('\n')}`);
+      }
       if (tools.length) lines.push(`Tools: ${tools.join('; ')}`);
       if (skipped.length) lines.push(`Skipped:\n${skipped.map((s) => `- ${s}`).join('\n')}`);
       if (stoppedAt) lines.push(`Stopped at ${stoppedAt}`);

@@ -128,6 +128,45 @@ test('mine-blocks walks into the cell of each drop and leaves no timer to cancel
   }
 });
 
+test('mine-blocks reports drops it could not reach and why', async (t) => {
+  const pickaxe = item('copper_pickaxe');
+  let ore: BlockType = block('iron_ore');
+  const entities: Record<number, unknown> = {};
+  const bot: Partial<mineflayer.Bot> = {
+    version: '1.21.11',
+    registry,
+    entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
+    entities: entities as mineflayer.Bot['entities'],
+    inventory: { items: () => [pickaxe] } as unknown as mineflayer.Bot['inventory'],
+    heldItem: null,
+    blockAt: ((p: Vec3) => {
+      const b = p.equals(new Vec3(0, 63, 1)) ? ore : block(p.y < 63 ? 'stone' : 'air');
+      b.position = p;
+      return b;
+    }) as mineflayer.Bot['blockAt'],
+    equip: sinon.stub().callsFake(async () => { bot.heldItem = pickaxe; }),
+    dig: sinon.stub().callsFake(async () => {
+      ore = block('air');
+      entities[7] = { id: 7, name: 'item', position: new Vec3(0.4, 63, 1.6) };
+    }),
+    waitForTicks: sinon.stub().resolves(),
+    pathfinder: {
+      goto: sinon.stub().rejects(new Error('No path to the goal!')),
+      setGoal: sinon.stub(),
+      movements: {},
+      setMovements: sinon.stub()
+    } as unknown as mineflayer.Bot['pathfinder']
+  };
+  const run = setUp(bot);
+
+  const result = await run({ blocks: [{ x: 0, y: 63, z: 1 }] });
+  const text = result.content[0].text;
+
+  t.true(text.includes('Drops seen nearby: 1'));
+  t.true(text.includes('Drops left behind:'));
+  t.true(text.includes('item at (0.4, 63.0, 1.6): no path from (0.5, 64.0, 0.5): No path to the goal!'));
+});
+
 test('mine-blocks stops instead of mining an ore it cannot harvest', async (t) => {
   const bot: Partial<mineflayer.Bot> = {
     entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
