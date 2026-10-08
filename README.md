@@ -100,6 +100,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `list-inventory` - List all items in the bot's inventory
 - `find-item` - Find a specific item in inventory
 - `equip-item` - Equip a specific item
+- `drop-item` - Drop items from inventory in the direction the bot is facing
 
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates

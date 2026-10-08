@@ -1,10 +1,10 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import type { Block } from 'prismarine-block';
-import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { findMatch, itemCountSchema, type ItemCountArgs } from './item-utils.js';
 
 const CONTAINER_BLOCKS = new Set([
   'chest',
@@ -25,29 +25,15 @@ const coordinateSchema = {
 };
 
 type Coordinates = { x: number; y: number; z: number };
-type TransferArgs = Coordinates & { itemName: string; count?: number };
+type TransferArgs = Coordinates & ItemCountArgs;
 
 const transferSchema = (verb: string) => ({
   ...coordinateSchema,
-  itemName: z.string().trim().min(1).describe(`Name of the item to ${verb}`),
-  count: z.number().int().positive().optional().describe(`Amount to ${verb} (default: all matching items)`)
+  ...itemCountSchema(verb)
 });
 
 function isContainerBlock(block: Block): boolean {
   return CONTAINER_BLOCKS.has(block.name) || block.name.endsWith('shulker_box');
-}
-
-/** Finds the first item matching the name and totals every stack of that same item type. */
-function findMatch(items: Item[], itemName: string): { item: Item; total: number } | undefined {
-  const needle = itemName.toLowerCase();
-  const item = items.find((candidate) => candidate.name.includes(needle));
-  if (!item) {
-    return undefined;
-  }
-  const total = items
-    .filter((candidate) => candidate.type === item.type)
-    .reduce((sum, candidate) => sum + candidate.count, 0);
-  return { item, total };
 }
 
 export function registerContainerTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
@@ -132,13 +118,12 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       }
       const { block, x, y, z } = resolved;
 
-      const match = findMatch(getBot().inventory.items(), itemName);
+      const match = findMatch(getBot().inventory.items(), itemName, count);
       if (!match) {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
-      const { item, total } = match;
-      const amount = Math.min(count ?? total, total);
+      const { item, amount } = match;
 
       return withContainer(block, async (container) => {
         await container.deposit(item.type, item.metadata ?? null, amount);
@@ -161,15 +146,14 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       const { block, x, y, z } = resolved;
 
       return withContainer(block, async (container) => {
-        const match = findMatch(container.containerItems(), itemName);
+        const match = findMatch(container.containerItems(), itemName, count);
         if (!match) {
           return factory.createResponse(
             `Couldn't find any item matching '${itemName}' in ${block.name} at (${x}, ${y}, ${z})`
           );
         }
 
-        const { item, total } = match;
-        const amount = Math.min(count ?? total, total);
+        const { item, amount } = match;
 
         await container.withdraw(item.type, item.metadata ?? null, amount);
         return factory.createResponse(
