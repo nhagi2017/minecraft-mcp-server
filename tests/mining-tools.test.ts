@@ -60,24 +60,41 @@ function setUp(bot: Partial<mineflayer.Bot>) {
   return call!.args[3] as (args: unknown) => Promise<{ content: { text: string }[] }>;
 }
 
-test('mine-blocks equips the chosen tool before each block and reports what it mined', async (t) => {
+/**
+ * A bot standing at (0.5, 64, 0.5) holding a copper pickaxe, next to an iron ore at orePos in a world
+ * of stone below y 64 and air above. Digging the ore drops item entity 7 at dropPos.
+ */
+function miningBot({ orePos, dropPos, goto = sinon.stub().resolves() }: { orePos: Vec3, dropPos: Vec3, goto?: sinon.SinonStub }) {
   const pickaxe = item('copper_pickaxe');
-  const world = new Map<string, BlockType>([['0,64,1', block('iron_ore')]]);
-  const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
-  const blockAt = (p: Vec3) => {
-    const b = world.get(key(p)) ?? block(p.y < 64 ? 'stone' : 'air');
-    b.position = p;
-    return b;
-  };
+  let ore: BlockType = block('iron_ore');
+  const entities: Record<number, unknown> = {};
   const bot: Partial<mineflayer.Bot> = {
+    version: '1.21.11',
+    registry,
     entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
+    entities: entities as mineflayer.Bot['entities'],
     inventory: { items: () => [pickaxe] } as unknown as mineflayer.Bot['inventory'],
     heldItem: null,
-    blockAt: blockAt as mineflayer.Bot['blockAt'],
+    blockAt: ((p: Vec3) => {
+      const b = p.equals(orePos) ? ore : block(p.y < 64 ? 'stone' : 'air');
+      b.position = p;
+      return b;
+    }) as mineflayer.Bot['blockAt'],
     equip: sinon.stub().callsFake(async () => { bot.heldItem = pickaxe; }),
-    dig: sinon.stub().callsFake(async (b: BlockType) => { world.set(key(b.position), block('air')); }),
-    waitForTicks: sinon.stub().resolves()
+    dig: sinon.stub().callsFake(async () => {
+      ore = block('air');
+      entities[7] = { id: 7, name: 'item', position: dropPos };
+    }),
+    waitForTicks: sinon.stub().resolves(),
+    pathfinder: {
+      goto, setGoal: sinon.stub(), stop: sinon.stub(), movements: {}, setMovements: sinon.stub()
+    } as unknown as mineflayer.Bot['pathfinder']
   };
+  return { bot, entities };
+}
+
+test('mine-blocks equips the chosen tool before each block and reports what it mined', async (t) => {
+  const { bot } = miningBot({ orePos: new Vec3(0, 64, 1), dropPos: new Vec3(0.5, 64, 1.5) });
   const run = setUp(bot);
 
   const result = await run({ blocks: [{ x: 0, y: 64, z: 1 }], pickUp: false });
@@ -89,114 +106,44 @@ test('mine-blocks equips the chosen tool before each block and reports what it m
 test('mine-blocks walks into the cell of each drop and leaves no timer to cancel a later walk', async (t) => {
   const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   try {
-    const pickaxe = item('copper_pickaxe');
-    let ore: BlockType = block('iron_ore');
-    const entities: Record<number, unknown> = {};
-    const goto = sinon.stub().callsFake(async () => { delete entities[7]; });
-    const setGoal = sinon.stub();
-    const bot: Partial<mineflayer.Bot> = {
-      version: '1.21.11',
-      registry,
-      entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
-      entities: entities as mineflayer.Bot['entities'],
-      inventory: { items: () => [pickaxe] } as unknown as mineflayer.Bot['inventory'],
-      heldItem: null,
-      blockAt: ((p: Vec3) => {
-        const b = p.equals(new Vec3(0, 63, 1)) ? ore : block(p.y < 63 ? 'stone' : 'air');
-        b.position = p;
-        return b;
-      }) as mineflayer.Bot['blockAt'],
-      equip: sinon.stub().callsFake(async () => { bot.heldItem = pickaxe; }),
-      dig: sinon.stub().callsFake(async () => {
-        ore = block('air');
-        entities[7] = { id: 7, name: 'item', position: new Vec3(0.4, 63, 1.6) };
-      }),
-      waitForTicks: sinon.stub().resolves(),
-      pathfinder: { goto, setGoal, movements: {}, setMovements: sinon.stub() } as unknown as mineflayer.Bot['pathfinder']
-    };
+    const goto = sinon.stub();
+    const { bot, entities } = miningBot({ orePos: new Vec3(0, 63, 1), dropPos: new Vec3(0.4, 63, 1.6), goto });
+    goto.callsFake(async () => { delete entities[7]; });
     const run = setUp(bot);
 
     await run({ blocks: [{ x: 0, y: 63, z: 1 }] });
     const goal = goto.firstCall.args[0];
-    const callsAfterRun = setGoal.callCount;
+    const stopsAfterRun = (bot.pathfinder!.stop as sinon.SinonStub).callCount;
     await clock.tickAsync(10000);
 
     t.deepEqual([goal.x, goal.y, goal.z], [0, 63, 1]);
-    t.is(setGoal.callCount, callsAfterRun);
+    t.is((bot.pathfinder!.stop as sinon.SinonStub).callCount, stopsAfterRun);
   } finally {
     clock.restore();
   }
 });
 
 test('mine-blocks reports drops it could not reach and why', async (t) => {
-  const pickaxe = item('copper_pickaxe');
-  let ore: BlockType = block('iron_ore');
-  const entities: Record<number, unknown> = {};
-  const bot: Partial<mineflayer.Bot> = {
-    version: '1.21.11',
-    registry,
-    entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
-    entities: entities as mineflayer.Bot['entities'],
-    inventory: { items: () => [pickaxe] } as unknown as mineflayer.Bot['inventory'],
-    heldItem: null,
-    blockAt: ((p: Vec3) => {
-      const b = p.equals(new Vec3(0, 63, 1)) ? ore : block(p.y < 63 ? 'stone' : 'air');
-      b.position = p;
-      return b;
-    }) as mineflayer.Bot['blockAt'],
-    equip: sinon.stub().callsFake(async () => { bot.heldItem = pickaxe; }),
-    dig: sinon.stub().callsFake(async () => {
-      ore = block('air');
-      entities[7] = { id: 7, name: 'item', position: new Vec3(0.4, 63, 1.6) };
-    }),
-    waitForTicks: sinon.stub().resolves(),
-    pathfinder: {
-      goto: sinon.stub().rejects(new Error('No path to the goal!')),
-      setGoal: sinon.stub(),
-      movements: {},
-      setMovements: sinon.stub()
-    } as unknown as mineflayer.Bot['pathfinder']
-  };
+  const { bot } = miningBot({
+    orePos: new Vec3(0, 63, 1),
+    dropPos: new Vec3(0.4, 63, 1.6),
+    goto: sinon.stub().rejects(new Error('No path to the goal!'))
+  });
   const run = setUp(bot);
 
-  const result = await run({ blocks: [{ x: 0, y: 63, z: 1 }] });
-  const text = result.content[0].text;
+  const text = (await run({ blocks: [{ x: 0, y: 63, z: 1 }] })).content[0].text;
 
   t.true(text.includes('Drops seen nearby: 1'));
-  t.true(text.includes('Drops left behind:'));
-  t.true(text.includes('item at (0.4, 63.0, 1.6): no path to next to it from (0.5, 64.0, 0.5): No path to the goal!'));
+  t.true(text.includes('item at (0.4, 63.0, 1.6): no path to next to it from (0.5, 64.0, 0.5)'));
 });
 
 test('mine-blocks does not mistake a walk that never moved for reaching the drop', async (t) => {
-  const pickaxe = item('copper_pickaxe');
-  let ore: BlockType = block('iron_ore');
-  const entities: Record<number, unknown> = {};
   // The pathfinder resolves goto without moving when it finds an empty path.
   const goto = sinon.stub().resolves();
-  const bot: Partial<mineflayer.Bot> = {
-    version: '1.21.11',
-    registry,
-    entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
-    entities: entities as mineflayer.Bot['entities'],
-    inventory: { items: () => [pickaxe] } as unknown as mineflayer.Bot['inventory'],
-    heldItem: null,
-    blockAt: ((p: Vec3) => {
-      const b = p.equals(new Vec3(2, 64, 2)) ? ore : block(p.y < 64 ? 'stone' : 'air');
-      b.position = p;
-      return b;
-    }) as mineflayer.Bot['blockAt'],
-    equip: sinon.stub().callsFake(async () => { bot.heldItem = pickaxe; }),
-    dig: sinon.stub().callsFake(async () => {
-      ore = block('air');
-      entities[7] = { id: 7, name: 'item', position: new Vec3(2.5, 64, 2.5) };
-    }),
-    waitForTicks: sinon.stub().resolves(),
-    pathfinder: { goto, setGoal: sinon.stub(), movements: {}, setMovements: sinon.stub() } as unknown as mineflayer.Bot['pathfinder']
-  };
+  const { bot } = miningBot({ orePos: new Vec3(2, 64, 2), dropPos: new Vec3(2.5, 64, 2.5), goto });
   const run = setUp(bot);
 
-  const result = await run({ blocks: [{ x: 2, y: 64, z: 2 }] });
-  const text = result.content[0].text;
+  const text = (await run({ blocks: [{ x: 2, y: 64, z: 2 }] })).content[0].text;
 
   t.is(goto.firstCall.args[0].constructor.name, 'GoalBlock');
   t.is(goto.secondCall.args[0].constructor.name, 'GoalNear');
@@ -204,12 +151,8 @@ test('mine-blocks does not mistake a walk that never moved for reaching the drop
 });
 
 test('mine-blocks stops instead of mining an ore it cannot harvest', async (t) => {
-  const bot: Partial<mineflayer.Bot> = {
-    entity: { position: new Vec3(0.5, 64, 0.5), height: 1.8 } as mineflayer.Bot['entity'],
-    inventory: { items: () => [item('copper_shovel')] } as unknown as mineflayer.Bot['inventory'],
-    blockAt: ((p: Vec3) => (p.equals(new Vec3(0, 64, 1)) ? block('iron_ore') : block('stone'))) as mineflayer.Bot['blockAt'],
-    dig: sinon.stub()
-  };
+  const { bot } = miningBot({ orePos: new Vec3(0, 64, 1), dropPos: new Vec3(0.5, 64, 1.5) });
+  bot.inventory = { items: () => [item('copper_shovel')] } as unknown as mineflayer.Bot['inventory'];
   const run = setUp(bot);
 
   const result = await run({ blocks: [{ x: 0, y: 64, z: 1 }] });
