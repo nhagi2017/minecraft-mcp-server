@@ -106,6 +106,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates
 - `dig-block` - Dig a block at specified coordinates
+- `mine-blocks` - Mine a list of blocks with the right tool for each, then pick up the drops
 - `get-block-info` - Get information about a block
 - `find-blocks` - Find one or more nearby blocks of a specific type
 
