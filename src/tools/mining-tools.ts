@@ -90,9 +90,39 @@ async function walkFor(bot: mineflayer.Bot, goal: pathfinderPkg.goals.Goal, ms: 
 
 const fmt = (p: Vec3) => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
 
-// Walks into the cell of each dropped item near the bot (standing beside one isn't always close
-// enough, e.g. when it lies in a hole), without digging or building on the way. Returns a note
-// for each drop it saw but couldn't collect, saying why, as the server's log isn't visible.
+// Tries to collect one drop: first by walking into its cell (standing beside it isn't always close
+// enough, e.g. when it lies in a hole), then, if that cell can't be stood in (a 1-high gap, or one
+// reachable only diagonally), by standing next to it. Returns why it failed, or null once collected.
+async function collectDrop(bot: mineflayer.Bot, drop: { id: number, position: Vec3 }): Promise<string | null> {
+  const cell = drop.position.floored();
+  const attempts: [string, pathfinderPkg.goals.Goal][] = [
+    ['its cell', new goals.GoalBlock(cell.x, cell.y, cell.z)],
+    ['next to it', new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)]
+  ];
+  let outcome = '';
+  for (const [where, goal] of attempts) {
+    try {
+      const finished = await walkFor(bot, goal, PICKUP_WALK_MS);
+      // goto also resolves when the pathfinder finds no path at all (an empty path), so a walk that
+      // "finished" may not have moved: check where the bot actually ended up.
+      outcome = !finished
+        ? `timed out walking to ${where} from ${fmt(bot.entity.position)}`
+        // Typed as taking a Move, but the pathfinder itself calls it with a floored position.
+        : goal.isEnd(bot.entity.position.floored() as unknown as Parameters<typeof goal.isEnd>[0])
+          ? `stood at ${where} ${fmt(bot.entity.position)} but it was still there`
+          : `no path to ${where} from ${fmt(bot.entity.position)}`;
+    } catch (error) {
+      outcome = `no path to ${where} from ${fmt(bot.entity.position)}: ${error instanceof Error ? error.message : error}`;
+    }
+    await bot.waitForTicks(4);
+    if (!bot.entities[drop.id]) return null;
+  }
+  log('warn', `Could not collect dropped item at ${cell}: ${outcome}`);
+  return outcome;
+}
+
+// Walks over each dropped item near the bot, without digging or building on the way. Returns a
+// note for each drop it saw but couldn't collect, saying why, as the server's log isn't visible.
 async function pickUpDrops(bot: mineflayer.Bot): Promise<{ seen: number, missed: string[] }> {
   const previous = bot.pathfinder.movements;
   const noDigging = new Movements(bot, minecraftData(bot.version));
@@ -108,18 +138,8 @@ async function pickUpDrops(bot: mineflayer.Bot): Promise<{ seen: number, missed:
       for (const drop of drops) {
         seen.add(drop.id);
         if (!bot.entities[drop.id]) continue; // already picked up on the way
-        const cell = drop.position.floored();
-        let outcome: string;
-        try {
-          outcome = (await walkFor(bot, new goals.GoalBlock(cell.x, cell.y, cell.z), PICKUP_WALK_MS))
-            ? `walked to ${fmt(bot.entity.position)} but it was still there`
-            : `timed out walking from ${fmt(bot.entity.position)}`;
-        } catch (error) {
-          outcome = `no path from ${fmt(bot.entity.position)}: ${error instanceof Error ? error.message : error}`;
-          log('warn', `Could not reach dropped item at ${cell}: ${outcome}`);
-        }
-        await bot.waitForTicks(4);
-        if (bot.entities[drop.id]) missed.set(drop.id, `item at ${fmt(drop.position)}: ${outcome}`);
+        const outcome = await collectDrop(bot, drop);
+        if (outcome) missed.set(drop.id, `item at ${fmt(drop.position)}: ${outcome}`);
         else missed.delete(drop.id);
       }
       await bot.waitForTicks(10);
